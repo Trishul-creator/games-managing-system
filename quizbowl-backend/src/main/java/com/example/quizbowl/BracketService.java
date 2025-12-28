@@ -5,86 +5,88 @@ import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.Collections;
+import java.util.UUID;
 
 @Service
 public class BracketService {
-    private final BracketState state = new BracketState();
     private final GameService gameService;
-    private final Map<String, String> currentTeamAByGame = new HashMap<>();
-    private final Map<String, String> currentTeamBByGame = new HashMap<>();
+    private final BracketTeamRepository teamRepo;
+    private final BracketMatchRepository matchRepo;
+    private final BracketMetaRepository metaRepo;
 
-    public BracketService(GameService gameService) {
+    public BracketService(GameService gameService, BracketTeamRepository teamRepo, BracketMatchRepository matchRepo, BracketMetaRepository metaRepo) {
         this.gameService = gameService;
+        this.teamRepo = teamRepo;
+        this.matchRepo = matchRepo;
+        this.metaRepo = metaRepo;
+    }
+
+    private BracketMetaEntity meta() {
+        return metaRepo.findById(1L).orElseGet(() -> metaRepo.save(new BracketMetaEntity()));
     }
 
     public synchronized BracketState getState() {
-        updateFinishedFlag();
-        computeSuggestions();
+        BracketState state = new BracketState();
+        state.setTeams(teamRepo.findAll().stream().map(this::toDtoTeam).toList());
+        state.setMatches(matchRepo.findAll().stream().map(this::toDtoMatch).toList());
+        BracketMetaEntity meta = meta();
+        state.setCurrentTeamAId(meta.getCurrentTeamAId());
+        state.setCurrentTeamBId(meta.getCurrentTeamBId());
+        updateFinishedFlag(state, meta);
+        computeSuggestions(state);
+        state.setFinished(meta.isFinished());
         return state;
     }
 
     public synchronized void initBracket(List<String> teamNames) {
-        state.getTeams().clear();
-        state.getMatches().clear();
-        state.setCurrentTeamAId(null);
-        state.setCurrentTeamBId(null);
-        state.setFinished(false);
-        state.setSuggestedWinnersTeamAId(null);
-        state.setSuggestedWinnersTeamBId(null);
-        state.setSuggestedLosersTeamAId(null);
-        state.setSuggestedLosersTeamBId(null);
-        state.getSuggestedWinnersPairs().clear();
-        state.getSuggestedLosersPairs().clear();
-        currentTeamAByGame.clear();
-        currentTeamBByGame.clear();
-
+        teamRepo.deleteAll();
+        matchRepo.deleteAll();
+        BracketMetaEntity meta = meta();
+        meta.setCurrentTeamAId(null);
+        meta.setCurrentTeamBId(null);
+        meta.setFinished(false);
+        metaRepo.save(meta);
         if (teamNames == null) {
             return;
         }
-
         for (String raw : teamNames) {
             if (StringUtils.hasText(raw)) {
-                state.getTeams().add(new BracketTeam(raw.trim()));
+                BracketTeamEntity t = new BracketTeamEntity();
+                t.setId(UUID.randomUUID().toString());
+                t.setName(raw.trim());
+                t.setLosses(0);
+                t.setEliminated(false);
+                teamRepo.save(t);
             }
         }
-        Collections.shuffle(state.getTeams());
     }
 
     public synchronized void resetBracket() {
-        state.getTeams().clear();
-        state.getMatches().clear();
-        state.setCurrentTeamAId(null);
-        state.setCurrentTeamBId(null);
-        state.setFinished(false);
-        state.setSuggestedWinnersTeamAId(null);
-        state.setSuggestedWinnersTeamBId(null);
-        state.setSuggestedLosersTeamAId(null);
-        state.setSuggestedLosersTeamBId(null);
-        state.getSuggestedWinnersPairs().clear();
-        state.getSuggestedLosersPairs().clear();
-        currentTeamAByGame.clear();
-        currentTeamBByGame.clear();
+        teamRepo.deleteAll();
+        matchRepo.deleteAll();
+        BracketMetaEntity meta = meta();
+        meta.setCurrentTeamAId(null);
+        meta.setCurrentTeamBId(null);
+        meta.setFinished(false);
+        metaRepo.save(meta);
     }
 
     public synchronized void setCurrentMatch(String teamAId, String teamBId, String gameId) {
-        state.setCurrentTeamAId(teamAId);
-        state.setCurrentTeamBId(teamBId);
-        currentTeamAByGame.put(gameId, teamAId);
-        currentTeamBByGame.put(gameId, teamBId);
+        BracketMetaEntity meta = meta();
+        meta.setCurrentTeamAId(teamAId);
+        meta.setCurrentTeamBId(teamBId);
+        metaRepo.save(meta);
 
-        BracketTeam teamA = findTeam(teamAId);
-        BracketTeam teamB = findTeam(teamBId);
+        BracketTeamEntity teamA = teamRepo.findById(teamAId).orElse(null);
+        BracketTeamEntity teamB = teamRepo.findById(teamBId).orElse(null);
 
         if (teamA != null && teamB != null) {
             gameService.setTeamNames(gameId, teamA.getName(), teamB.getName());
             String bracketName = (teamA.getLosses() == 0 && teamB.getLosses() == 0) ? "WINNERS" : "LOSERS";
 
-            BracketMatch existing = state.getMatches().stream()
+            BracketMatchEntity existing = matchRepo.findAll().stream()
                     .filter(m -> !m.isCompleted()
                             && ((teamAId.equals(m.getTeamAId()) && teamBId.equals(m.getTeamBId()))
                             || (teamAId.equals(m.getTeamBId()) && teamBId.equals(m.getTeamAId()))))
@@ -93,25 +95,33 @@ public class BracketService {
 
             if (existing == null) {
                 int round = 1;
-                for (BracketMatch m : state.getMatches()) {
+                for (BracketMatchEntity m : matchRepo.findAll()) {
                     if (bracketName.equals(m.getBracket()) && m.getRound() >= round) {
                         round = m.getRound() + 1;
                     }
                 }
-                state.getMatches().add(new BracketMatch(bracketName, round, teamAId, teamBId));
+                BracketMatchEntity nm = new BracketMatchEntity();
+                nm.setId(UUID.randomUUID().toString());
+                nm.setBracket(bracketName);
+                nm.setRound(round);
+                nm.setTeamAId(teamAId);
+                nm.setTeamBId(teamBId);
+                nm.setCompleted(false);
+                matchRepo.save(nm);
             }
         }
     }
 
     public synchronized void finalizeCurrentMatch(String gameId) {
-        String teamAId = currentTeamAByGame.getOrDefault(gameId, state.getCurrentTeamAId());
-        String teamBId = currentTeamBByGame.getOrDefault(gameId, state.getCurrentTeamBId());
+        BracketMetaEntity meta = meta();
+        String teamAId = meta.getCurrentTeamAId();
+        String teamBId = meta.getCurrentTeamBId();
         if (teamAId == null || teamBId == null) {
             return;
         }
 
-        BracketTeam teamA = findTeam(teamAId);
-        BracketTeam teamB = findTeam(teamBId);
+        BracketTeamEntity teamA = teamRepo.findById(teamAId).orElse(null);
+        BracketTeamEntity teamB = teamRepo.findById(teamBId).orElse(null);
         if (teamA == null || teamB == null) {
             return;
         }
@@ -124,7 +134,7 @@ public class BracketService {
         }
 
         String bracketName = (teamA.getLosses() == 0 && teamB.getLosses() == 0) ? "WINNERS" : "LOSERS";
-        BracketMatch match = state.getMatches().stream()
+        BracketMatchEntity match = matchRepo.findAll().stream()
                 .filter(m -> !m.isCompleted()
                         && teamAId.equals(m.getTeamAId())
                         && teamBId.equals(m.getTeamBId()))
@@ -133,13 +143,17 @@ public class BracketService {
 
         if (match == null) {
             int round = 1;
-            for (BracketMatch m : state.getMatches()) {
+            for (BracketMatchEntity m : matchRepo.findAll()) {
                 if (bracketName.equals(m.getBracket()) && m.getRound() >= round) {
                     round = m.getRound() + 1;
                 }
             }
-            match = new BracketMatch(bracketName, round, teamAId, teamBId);
-            state.getMatches().add(match);
+            match = new BracketMatchEntity();
+            match.setId(UUID.randomUUID().toString());
+            match.setBracket(bracketName);
+            match.setRound(round);
+            match.setTeamAId(teamAId);
+            match.setTeamBId(teamBId);
         }
 
         match.setScoreA(scoreA);
@@ -151,6 +165,7 @@ public class BracketService {
             if (teamB.getLosses() >= 2) {
                 teamB.setEliminated(true);
             }
+            teamRepo.save(teamB);
         } else {
             match.setWinnerId(teamBId);
             match.setLoserId(teamAId);
@@ -158,20 +173,24 @@ public class BracketService {
             if (teamA.getLosses() >= 2) {
                 teamA.setEliminated(true);
             }
+            teamRepo.save(teamA);
         }
         match.setCompleted(true);
+        matchRepo.save(match);
 
-        updateFinishedFlag();
+        BracketState state = getState();
+        updateFinishedFlag(state, meta());
     }
 
-    private void updateFinishedFlag() {
+    private void updateFinishedFlag(BracketState state, BracketMetaEntity meta) {
         long alive = state.getTeams().stream()
                 .filter(t -> !t.isEliminated())
                 .count();
-        state.setFinished(alive <= 1 && !state.getTeams().isEmpty());
+        meta.setFinished(alive <= 1 && !state.getTeams().isEmpty());
+        metaRepo.save(meta);
     }
 
-    private void computeSuggestions() {
+    private void computeSuggestions(BracketState state) {
         state.setSuggestedWinnersTeamAId(null);
         state.setSuggestedWinnersTeamBId(null);
         state.setSuggestedLosersTeamAId(null);
@@ -253,15 +272,27 @@ public class BracketService {
         }
     }
 
-    private BracketTeam findTeam(String id) {
-        if (id == null) {
-            return null;
-        }
-        for (BracketTeam team : state.getTeams()) {
-            if (id.equals(team.getId())) {
-                return team;
-            }
-        }
-        return null;
+    private BracketTeam toDtoTeam(BracketTeamEntity e) {
+        BracketTeam t = new BracketTeam();
+        t.setId(e.getId());
+        t.setName(e.getName());
+        t.setLosses(e.getLosses());
+        t.setEliminated(e.isEliminated());
+        return t;
+    }
+
+    private BracketMatch toDtoMatch(BracketMatchEntity e) {
+        BracketMatch m = new BracketMatch();
+        m.setId(e.getId());
+        m.setBracket(e.getBracket());
+        m.setRound(e.getRound());
+        m.setTeamAId(e.getTeamAId());
+        m.setTeamBId(e.getTeamBId());
+        m.setScoreA(e.getScoreA());
+        m.setScoreB(e.getScoreB());
+        m.setWinnerId(e.getWinnerId());
+        m.setLoserId(e.getLoserId());
+        m.setCompleted(e.isCompleted());
+        return m;
     }
 }

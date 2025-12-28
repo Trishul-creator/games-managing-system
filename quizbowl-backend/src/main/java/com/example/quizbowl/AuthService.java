@@ -6,35 +6,48 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class AuthService {
     private static final String ADMIN_USER = "administrator";
     private static final String ADMIN_PASS = "password";
-    private final Map<String, UserRecord> userStore = new ConcurrentHashMap<>();
-    private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
+    private final Map<String, SessionInfo> sessions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final UserRepository userRepository;
 
-    public AuthService() {
-        userStore.put(ADMIN_USER, new UserRecord(ADMIN_USER, ADMIN_PASS, "ADMIN"));
+    public AuthService(UserRepository userRepository) {
+        this.userRepository = userRepository;
+        seedAdmin();
+    }
+
+    private void seedAdmin() {
+        userRepository.findById(ADMIN_USER).orElseGet(() -> {
+            UserEntity u = new UserEntity();
+            u.setUsername(ADMIN_USER);
+            u.setPassword(ADMIN_PASS);
+            u.setRole("ADMIN");
+            return userRepository.save(u);
+        });
     }
 
     public synchronized LoginResponse register(String username, String password) {
         if (username == null || username.isBlank() || password == null || password.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Username and password required");
         }
-        if (ADMIN_USER.equals(username) || userStore.containsKey(username)) {
+        if (ADMIN_USER.equals(username) || userRepository.existsById(username)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "User already exists");
         }
-        UserRecord record = new UserRecord(username, password, "USER");
-        userStore.put(username, record);
-        return createSession(username, record.role());
+        UserEntity record = new UserEntity();
+        record.setUsername(username);
+        record.setPassword(password);
+        record.setRole("USER");
+        userRepository.save(record);
+        return createSession(username, record.getRole());
     }
 
     public synchronized LoginResponse login(String username, String password) {
-        UserRecord record = userStore.get(username);
-        if (record != null && record.password().equals(password)) {
-            return createSession(record.username(), record.role());
+        UserEntity record = userRepository.findById(username).orElse(null);
+        if (record != null && record.getPassword().equals(password)) {
+            return createSession(record.getUsername(), record.getRole());
         }
         throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
     }
@@ -56,26 +69,33 @@ public class AuthService {
         if (info == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid session");
         }
-        UserRecord record = userStore.get(info.username());
+        UserEntity record = userRepository.findById(info.username()).orElse(null);
         if (record == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid session");
         }
         String targetUsername = info.username();
         if (newUsername != null && !newUsername.isBlank() && !newUsername.equals(info.username())) {
-            if (userStore.containsKey(newUsername) || ADMIN_USER.equals(newUsername)) {
+            if (userRepository.existsById(newUsername) || ADMIN_USER.equals(newUsername)) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "Username already exists");
             }
-            userStore.remove(info.username());
-            userStore.put(newUsername, new UserRecord(newUsername, record.password(), record.role()));
+            userRepository.deleteById(info.username());
+            UserEntity updated = new UserEntity();
+            updated.setUsername(newUsername);
+            updated.setPassword(record.getPassword());
+            updated.setRole(record.getRole());
+            userRepository.save(updated);
             targetUsername = newUsername;
-            sessions.put(token, new SessionInfo(newUsername, record.role()));
+            sessions.put(token, new SessionInfo(newUsername, record.getRole()));
         }
         if (newPassword != null && !newPassword.isBlank()) {
-            UserRecord updated = new UserRecord(targetUsername, newPassword, record.role());
-            userStore.put(targetUsername, updated);
+            UserEntity updated = userRepository.findById(targetUsername).orElse(new UserEntity());
+            updated.setUsername(targetUsername);
+            updated.setPassword(newPassword);
+            updated.setRole(record.getRole());
+            userRepository.save(updated);
         }
-        UserRecord updatedFinal = userStore.get(targetUsername);
-        return new LoginResponse(token, updatedFinal.username(), updatedFinal.role());
+        UserEntity updatedFinal = userRepository.findById(targetUsername).orElse(record);
+        return new LoginResponse(token, updatedFinal.getUsername(), updatedFinal.getRole());
     }
 
     private LoginResponse createSession(String username, String role) {
@@ -85,6 +105,4 @@ public class AuthService {
     }
 
     record SessionInfo(String username, String role) {}
-
-    record UserRecord(String username, String password, String role) {}
 }
