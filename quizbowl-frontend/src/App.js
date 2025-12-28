@@ -3,7 +3,7 @@ import axios from "axios";
 import "./App.css";
 
 const api = axios.create({
-  baseURL: "http://localhost:8090/api",
+  baseURL: "http://localhost:5000/api",
 });
 
 function useInterval(callback, delay) {
